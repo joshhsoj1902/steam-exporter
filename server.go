@@ -33,6 +33,8 @@ const API_ORIGIN = "https://api.steampowered.com"
 const OWNED_GAMES_ENDPOINT = "/IPlayerService/GetOwnedGames/v0001/"
 const ACHIEVEMENTS_ENDPOINT = "/ISteamUserStats/GetUserStatsForGame/v0002/"
 
+var achievementCache = NewAchievementCache()
+
 func initMetrics() {
 	prometheus.MustRegister(ownedGamePlaytimeGauge)
 	prometheus.MustRegister(achievementGauge)
@@ -239,14 +241,7 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 			}
 
 			fmt.Printf("Found Games: %+v\n", resp.GameCount)
-			// fmt.Printf("Games: %+v\n", resp.Games)
-			// continue
 
-			// games := []OwnedGame{
-			// 	{AppId: 599140, Name: "Graveyard Keeper", PlaytimeForever: 3377},
-			// }
-
-			// for _, game := range games {
 			for _, game := range resp.Games {
 				reportOwnedGame(game, user)
 
@@ -254,6 +249,21 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 				if game.PlaytimeForever == 0 {
 					fmt.Printf("Skipping achievements for %s (0 playtime)\n", game.Name)
 					continue
+				}
+
+				// Check if we need to invalidate the cache
+				if !achievementCache.ShouldInvalidate(game.AppId, game.PlaytimeForever) {
+					// Use cached achievements
+					if entry, exists := achievementCache.Get(game.AppId); exists {
+						fmt.Printf("Using cached achievements for %s\n", game.Name)
+						reportAchievements(
+							entry.Achievements,
+							game.Name,
+							game.AppId,
+							user,
+						)
+						continue
+					}
 				}
 
 				// Add a small delay between achievement requests to avoid rate limiting
@@ -268,6 +278,9 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 				fmt.Printf("RAW Achievements: %+v\n", achievementResp)
 
 				fmt.Printf("Achievements: [%s] %+v\n", game.Name, achievementResp.PlayerStats.Achievements)
+
+				// Cache the achievements
+				achievementCache.Set(game.AppId, achievementResp.PlayerStats.Achievements, game.PlaytimeForever)
 
 				reportAchievements(
 					achievementResp.PlayerStats.Achievements,
