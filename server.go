@@ -32,6 +32,7 @@ var achievementGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 const API_ORIGIN = "https://api.steampowered.com"
 const OWNED_GAMES_ENDPOINT = "/IPlayerService/GetOwnedGames/v0001/"
 const ACHIEVEMENTS_ENDPOINT = "/ISteamUserStats/GetUserStatsForGame/v0002/"
+const GLOBAL_ACHIEVEMENTS_ENDPOINT = "/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/"
 
 var achievementCache = NewAchievementCache()
 
@@ -219,14 +220,71 @@ func callSteamGetAchievements(key string, user string, appId uint64) (Achievemen
 	return achievementResponse, err
 }
 
-func reportAchievements(achievements []Achievement, gameName string, appId uint64, userId string) {
-	for _, achievement := range achievements {
+func callSteamGetGlobalAchievements(appId uint64) (GlobalAchievementResponse, error) {
+	globalAchievementResponse := GlobalAchievementResponse{}
+	url := fmt.Sprintf("%s%s", API_ORIGIN, GLOBAL_ACHIEVEMENTS_ENDPOINT)
+
+	// Create a new client with timeout
+	myClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return globalAchievementResponse, err
+	}
+
+	q := req.URL.Query()
+	q.Add("gameid", strconv.FormatUint(appId, 10))
+	req.URL.RawQuery = q.Encode()
+
+	// Debug: Print the full request URL
+	fmt.Printf("Global Achievement Request URL: %s\n", req.URL.String())
+
+	r, err := myClient.Do(req)
+	if err != nil {
+		fmt.Printf("Global Achievement Request Error: %v\n", err)
+		return globalAchievementResponse, err
+	}
+	defer r.Body.Close()
+
+	// Debug: Print response status
+	fmt.Printf("Global Achievement Response Status: %s\n", r.Status)
+
+	// Debug: Read and print response body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %v\n", err)
+		return globalAchievementResponse, err
+	}
+	fmt.Printf("Global Achievement Response Body: %s\n", string(bodyBytes))
+
+	// Create a new reader from the body bytes since we've already read it
+	err = json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&globalAchievementResponse)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return globalAchievementResponse, err
+	}
+
+	return globalAchievementResponse, nil
+}
+
+func reportAchievements(userAchievements []Achievement, globalAchievements []GlobalAchievement, gameName string, appId uint64, userId string) {
+	// Create a map of user achievements for quick lookup
+	userAchievementMap := make(map[string]int)
+	for _, achievement := range userAchievements {
+		userAchievementMap[achievement.Name] = achievement.Achieved
+	}
+
+	// Report all achievements, using 0 for unearned ones
+	for _, globalAchievement := range globalAchievements {
+		achieved := 0
+		if earned, exists := userAchievementMap[globalAchievement.Name]; exists {
+			achieved = earned
+		}
 		achievementGauge.With(prometheus.Labels{
 			"game_name":        gameName,
 			"app_id":           strconv.FormatUint(appId, 10),
-			"achievement_name": achievement.Name,
+			"achievement_name": globalAchievement.Name,
 			"steam_id":         userId,
-		}).Set(float64(achievement.Achieved))
+		}).Set(float64(achieved))
 	}
 }
 
@@ -251,39 +309,52 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 					continue
 				}
 
-				// Check if we need to invalidate the cache
-				if !achievementCache.ShouldInvalidate(game.AppId, game.PlaytimeForever) {
-					// Use cached achievements
-					if entry, exists := achievementCache.Get(game.AppId); exists {
-						fmt.Printf("Using cached achievements for %s\n", game.Name)
-						reportAchievements(
-							entry.Achievements,
-							game.Name,
-							game.AppId,
-							user,
-						)
+				// Get global achievements from cache or fetch them
+				var globalAchievements []GlobalAchievement
+				if globalEntry, exists := achievementCache.GetGlobalAchievements(game.AppId); exists {
+					fmt.Printf("Using cached global achievements for %s\n", game.Name)
+					globalAchievements = globalEntry.GlobalAchievements
+				} else {
+					// Fetch global achievements
+					globalAchievementResp, err := callSteamGetGlobalAchievements(game.AppId)
+					if err != nil {
+						fmt.Printf("Error fetching global achievements for game %s: %v\n", game.Name, err)
 						continue
+					}
+					fmt.Printf("RAW Global Achievements: %+v\n", globalAchievementResp)
+					globalAchievements = globalAchievementResp.AchievementPercentages.Achievements
+					achievementCache.SetGlobalAchievements(game.AppId, globalAchievements)
+				}
+
+				// Check if we need to invalidate the user achievements cache
+				var userAchievements []Achievement
+				if !achievementCache.ShouldInvalidateUserCache(game.AppId, game.PlaytimeForever) {
+					// Use cached user achievements
+					if userEntry, exists := achievementCache.GetUserAchievements(game.AppId); exists {
+						fmt.Printf("Using cached user achievements for %s\n", game.Name)
+						userAchievements = userEntry.UserAchievements
 					}
 				}
 
-				// Add a small delay between achievement requests to avoid rate limiting
-				time.Sleep(1 * time.Second)
+				// If we don't have cached user achievements, fetch them
+				if userAchievements == nil {
+					// Add a small delay between achievement requests to avoid rate limiting
+					time.Sleep(1 * time.Second)
 
-				// Fetch and report achievements for each game
-				achievementResp, err := callSteamGetAchievements(key, user, game.AppId)
-				if err != nil {
-					fmt.Printf("Error fetching achievements for game %s: %v\n", game.Name, err)
-					continue
+					// Fetch user achievements
+					achievementResp, err := callSteamGetAchievements(key, user, game.AppId)
+					if err != nil {
+						fmt.Printf("Error fetching achievements for game %s: %v\n", game.Name, err)
+						continue
+					}
+					fmt.Printf("RAW Achievements: %+v\n", achievementResp)
+					userAchievements = achievementResp.PlayerStats.Achievements
+					achievementCache.SetUserAchievements(game.AppId, userAchievements, game.PlaytimeForever)
 				}
-				fmt.Printf("RAW Achievements: %+v\n", achievementResp)
-
-				fmt.Printf("Achievements: [%s] %+v\n", game.Name, achievementResp.PlayerStats.Achievements)
-
-				// Cache the achievements
-				achievementCache.Set(game.AppId, achievementResp.PlayerStats.Achievements, game.PlaytimeForever)
 
 				reportAchievements(
-					achievementResp.PlayerStats.Achievements,
+					userAchievements,
+					globalAchievements,
 					game.Name,
 					game.AppId,
 					user,
