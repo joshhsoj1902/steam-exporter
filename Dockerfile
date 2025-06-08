@@ -2,10 +2,8 @@ FROM golang:alpine as builder
 
 WORKDIR /app
 
-COPY owned_games.go owned_games.go
-COPY server.go server.go
-COPY go.mod go.mod
-COPY go.sum go.sum
+COPY *.go ./
+COPY go.mod go.sum ./
 
 RUN go get -d -v
 RUN CGO_ENABLED=0 GOOS=linux go build -o steam_exporter .
