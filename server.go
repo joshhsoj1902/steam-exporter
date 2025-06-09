@@ -248,6 +248,16 @@ func callSteamGetGlobalAchievements(appId uint64) (GlobalAchievementResponse, er
 	// Debug: Print response status
 	fmt.Printf("Global Achievement Response Status: %s\n", r.Status)
 
+	// Handle specific status codes
+	switch r.StatusCode {
+	case http.StatusOK:
+		// Continue with JSON parsing
+	case http.StatusForbidden:
+		return globalAchievementResponse, fmt.Errorf("game has no achievements (403)")
+	default:
+		return globalAchievementResponse, fmt.Errorf("unexpected status code %d", r.StatusCode)
+	}
+
 	// Debug: Read and print response body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -318,12 +328,24 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 					// Fetch global achievements
 					globalAchievementResp, err := callSteamGetGlobalAchievements(game.AppId)
 					if err != nil {
+						if err.Error() == "game has no achievements (403)" {
+							fmt.Printf("Game %s has no achievements, skipping\n", game.Name)
+							// Cache empty achievements to prevent repeated 403s
+							achievementCache.SetGlobalAchievements(game.AppId, []GlobalAchievement{})
+							continue
+						}
 						fmt.Printf("Error fetching global achievements for game %s: %v\n", game.Name, err)
 						continue
 					}
 					fmt.Printf("RAW Global Achievements: %+v\n", globalAchievementResp)
 					globalAchievements = globalAchievementResp.AchievementPercentages.Achievements
 					achievementCache.SetGlobalAchievements(game.AppId, globalAchievements)
+				}
+
+				// Skip user achievements if there are no global achievements
+				if len(globalAchievements) == 0 {
+					fmt.Printf("No achievements available for %s, skipping user achievements\n", game.Name)
+					continue
 				}
 
 				// Check if we need to invalidate the user achievements cache
@@ -339,7 +361,7 @@ func pollApiForMetrics(sleep time.Duration, key string, user string) {
 				// If we don't have cached user achievements, fetch them
 				if userAchievements == nil {
 					// Add a small delay between achievement requests to avoid rate limiting
-					time.Sleep(1 * time.Second)
+					time.Sleep(5 * time.Second)
 
 					// Fetch user achievements
 					achievementResp, err := callSteamGetAchievements(key, user, game.AppId)
