@@ -20,7 +20,7 @@ var ownedGamePlaytimeGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Subsystem: "owned_games",
 	Name:      "playtime_seconds",
 	Help:      "Amount of time an owned games is played forever",
-}, []string{"app_id", "name", "steam_id"})
+}, []string{"app_id", "game_name", "steam_id"})
 
 var achievementGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "steam",
@@ -155,9 +155,9 @@ func reportOwnedGame(game OwnedGame, userId string) {
 	// Prometheus prefers seconds rather than minutes
 	var playtimeSeconds = float64(60 * game.PlaytimeForever)
 	ownedGamePlaytimeGauge.With(prometheus.Labels{
-		"name":     game.Name,
-		"app_id":   strconv.FormatUint(game.AppId, 10),
-		"steam_id": userId,
+		"game_name": game.Name,
+		"app_id":    strconv.FormatUint(game.AppId, 10),
+		"steam_id":  userId,
 	}).Set(playtimeSeconds)
 }
 
